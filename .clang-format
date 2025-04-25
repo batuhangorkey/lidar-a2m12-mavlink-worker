@@ -1,0 +1,7 @@
+BinPackArguments: false
+ColumnLimit: 100
+AlignAfterOpenBracket: AlwaysBreak
+AllowShortFunctionsOnASingleLine: None
+IndentWidth: 4
+UseTab: Never
+BreakBeforeBraces: Attach
