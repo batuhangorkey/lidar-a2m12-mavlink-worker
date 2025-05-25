@@ -1,13 +1,11 @@
 #include <rplidar.h>
 #include <signal.h>
 #include <stdio.h>
-
 #include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <string>
 #include <thread>
-
 #include "mavsdk/mavlink_include.h"
 #include "mavsdk/mavsdk.h"
 #include "mavsdk/plugins/mavlink_passthrough/mavlink_passthrough.h"
@@ -16,6 +14,7 @@
 #include "sl_lidar_driver.h"
 #include "utils.h"
 
+using namespace std;
 using namespace mavsdk;
 using namespace sl;
 
@@ -24,71 +23,67 @@ static bool ctrl_c_pressed = false;
 
 void ctrlc(int sig) {
     fprintf(stderr, "\nctrl-c pressed, exiting...\n");
+    
+    lidar->stop();
+    lidar->setMotorSpeed(0);
+
     ctrl_c_pressed = true;
 }
 
 int main(int argc, char *argv[]) {
-    // first arg is lidar, second is mavlink
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <lidar_port> <mavlink_port>\n", argv[0]);
-        return -1;
-    }
-
-    std::string lidar_port = argv[1];
-    std::string mavlink_port = argv[2];
-
-    fprintf(stderr, "Lidar port: %s\n", lidar_port.c_str());
-    fprintf(stderr, "Mavlink port: %s\n", mavlink_port.c_str());
-
-    if (signal(SIGTERM, ctrlc) == SIG_ERR) {
-        fprintf(stderr, "Error setting signal handler\n");
-        return -1;
-    }
-
+    signal(SIGINT, ctrlc);
+    signal(SIGQUIT, ctrlc);
+    signal(SIGTERM, ctrlc);
+    
     auto config = Mavsdk::Configuration(ComponentType::CompanionComputer);
     config.set_always_send_heartbeats(true);
     config.set_system_id(1);
     config.set_component_id(MAV_COMP_ID_USER1);
     Mavsdk mavlinkClient(config);
     // auto result = mavlinkClient.add_any_connection("udpout://172.20.128.1:14550");
-    auto result = mavlinkClient.add_any_connection(mavlink_port);
+    auto result = mavlinkClient.add_any_connection("udpout://127.0.0.1:14550");
+    // auto result = mavlinkClient.add_any_connection(mavlink_port);
     if (result != ConnectionResult::Success) {
         std::cerr << "Connection failed: " << result << std::endl;
         return -1;
     }
-
+    
     sleep_s(3);
     fprintf(stderr, "Found %zu system(s)\n", mavlinkClient.systems().size());
-
+    
     std::shared_ptr<System> gcs;
     for (auto &system : mavlinkClient.systems()) {
         std::cout << "System found with ID: " << static_cast<int>(system->get_system_id())
-                  << std::endl;
+        << std::endl;
         if (system->get_system_id() == 255) {
             gcs = system;
             break;
         }
     }
-
+    
+    std::unique_ptr<MavlinkPassthrough> mavlinkPassthrough;
     if (gcs == nullptr) {
         std::cerr << "No GCS found" << std::endl;
-        return -1;
     }
-    std::cout << "Found GCS with ID: " << static_cast<int>(gcs->get_system_id()) << std::endl;
-
-    auto mavlinkPassthrough = MavlinkPassthrough(*gcs);
-
-    ///  Create a communication channel instance
-    // auto channel = createSerialPortChannel("/dev/ttyUSB0", 256000);
+    else{
+        std::cout << "Found GCS with ID: " << static_cast<int>(gcs->get_system_id()) << std::endl;
+        mavlinkPassthrough = std::make_unique<MavlinkPassthrough>(gcs);
+    }
+    
+    
+    std::string lidar_port = "/dev/ttyUSB0";
+    fprintf(stderr, "Lidar port: %s\n", lidar_port.c_str());
     auto channel = createSerialPortChannel(lidar_port.c_str(), 256000);
-
+    
     ///  Create a LIDAR driver instance
     auto res = lidar->connect(*channel);
     if (!SL_IS_OK(res)) {
         fprintf(stderr, "Failed to connect to LIDAR %08x\r\n", res);
         return -1;
     }
-
+    printf("Connected to LIDAR on port %s\n", lidar_port.c_str());
+    lidar->stop();
+    lidar->setMotorSpeed(0);    
     sl_lidar_response_device_info_t deviceInfo;
     res = lidar->getDeviceInfo(deviceInfo);
     if (SL_IS_OK(res)) {
@@ -132,7 +127,12 @@ int main(int argc, char *argv[]) {
                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                           std::chrono::steady_clock::now().time_since_epoch())
                                           .count());
-            auto res = mavlinkPassthrough.queue_message(
+            // check if we have a GCS
+            if (gcs == nullptr) {
+                fprintf(stderr, "No GCS found, skipping message sending.\n");
+                continue;
+            }
+            auto res = mavlinkPassthrough->queue_message(
                 [&distances, &time_usec](MavlinkAddress address, auto channel) {
                     mavlink_message_t message;
                     mavlink_msg_obstacle_distance_pack_chan(
@@ -151,10 +151,9 @@ int main(int argc, char *argv[]) {
                         MAV_FRAME_BODY_FRD);
                     return message;
                 });
-            std::cout << "Sending message: " << res << std::endl;
+            // std::cout << "Sending message: " << res << std::endl;
             // for (int pos = 0; pos < (int)count; ++pos) {
             //   auto dist_cm = nodes[pos].dist_mm_q2 * 10.0f / 4.0f;
-
             //   printf("%s theta: %03.2f Dist (cm): %08.2f Q: %d \n",
             //          (nodes[pos].flag & SL_LIDAR_RESP_HQ_FLAG_SYNCBIT) ? "S " : "
             //          ", (nodes[pos].angle_z_q14 * 90.f) / 16384.f,
